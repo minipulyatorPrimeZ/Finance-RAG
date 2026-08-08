@@ -4,32 +4,46 @@ Retrieval-Augmented Generation для финансовых документов.
 
 Датасет: [ACM-ICAIF '24 Finance RAG Challenge](https://www.kaggle.com/competitions/icaif-24-finance-rag-challenge) — бенчмарк **FinanceBench**.
 
-Формат данных (как в соревновании):
+Формат данных:
 
 | File | Description |
 |------|-------------|
-| `corpus.jsonl` | пассажи/документы: `_id`, `title`, `text` |
-| `queries.jsonl` | вопросы: `_id`, `text` |
+| `corpus.jsonl` | `_id`, `title`, `text` |
+| `queries.jsonl` | `_id`, `text` |
 | `FinanceBench_qrels.tsv` | `query_id`, `corpus_id`, `score` |
 
-Альтернатива: [Linq-AI-Research/FinanceRAG](https://huggingface.co/datasets/Linq-AI-Research/FinanceRAG) на HuggingFace.
+## Версии / Changelog
 
-## Пайплайн
+### v2
+- Reranker по умолчанию: `BAAI/bge-reranker-v2-m3` (вместо ms-marco MiniLM)
+- В генерацию уходит **5–7** пассажей (default 7), не 3
+- Structured answer: `MODE` = exact | inferred | insufficient
+- Если точного факта нет — модель описывает, что нашлось, и делает осторожный вывод (inference)
+- **Confidence score** (0–1): смесь LLM self-report + сила retrieval/rerank scores
+- `format_answer()` для читаемого вывода
+- Reranker включён по умолчанию в `RetrievalPipeline`
 
-1. **Sparse** — BM25 (`rank_bm25`)
+### v1
+- BM25 + dense (MiniLM) + RRF hybrid
+- Optional CE rerank (ms-marco MiniLM)
+- Generation: Groq / Ollama / extractive
+- Eval: NDCG@k, Recall@k, MRR@k
+
+## Пайплайн (v2)
+
+1. **Sparse** — BM25
 2. **Dense** — `sentence-transformers` + FAISS (numpy fallback)
-3. **Hybrid** — Reciprocal Rank Fusion (RRF)
-4. **Rerank** — cross-encoder (`ms-marco-MiniLM-L-6-v2`), опционально
-5. **Generate** — Groq API / Ollama / extractive fallback, с цитированием `[1]`, `[2]`
-6. **Eval** — NDCG@k, Recall@k, MRR@k по qrels
+3. **Hybrid** — RRF
+4. **Rerank** — `BAAI/bge-reranker-v2-m3`
+5. **Generate** — Groq / Ollama, 5–7 чанков, citations, confidence
+6. **Eval** — NDCG@k / Recall@k / MRR@k
 
 ## Структура
 
 ```
 .
-├── data/                  # corpus.jsonl, queries.jsonl, *qrels*.tsv
-├── notebooks/
-│   └── finance_rag.ipynb
+├── data/
+├── notebooks/finance_rag.ipynb
 ├── src/
 │   ├── data_loader.py
 │   ├── sparse.py
@@ -40,7 +54,7 @@ Retrieval-Augmented Generation для финансовых документов.
 │   ├── evaluate.py
 │   ├── pipeline.py
 │   └── utils.py
-├── models/                # кэш эмбеддингов (опционально)
+├── models/
 ├── results/
 ├── requirements.txt
 └── README.md
@@ -54,10 +68,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Для генерации:
+Первый запуск скачает embedding + reranker (bge-reranker-v2-m3 заметно тяжелее MiniLM).
 
 ```bash
-export GROQ_API_KEY=...          # https://console.groq.com
+export GROQ_API_KEY=...     # https://console.groq.com
 # или
 ollama pull llama3.1 && ollama serve
 ```
@@ -66,13 +80,10 @@ ollama pull llama3.1 && ollama serve
 
 ```bash
 mkdir -p data
-# из Kaggle competition data или HF — положите:
-#   data/corpus.jsonl
-#   data/queries.jsonl
-#   data/FinanceBench_qrels.tsv
+# corpus.jsonl, queries.jsonl, FinanceBench_qrels.tsv → data/
 ```
 
-Без этих файлов `load_financebench()` падает с `FileNotFoundError` (синтетика не подставляется).
+Без файлов `load_financebench()` поднимает `FileNotFoundError`.
 
 ## Запуск
 
@@ -80,33 +91,49 @@ mkdir -p data
 jupyter notebook notebooks/finance_rag.ipynb
 ```
 
-Ноутбук:
-- загружает corpus / queries / qrels
-- строит BM25 + dense индекс
-- сравнивает dense / bm25 / hybrid / hybrid+reranker по NDCG@10
-- генерирует ответы на нескольких вопросах с цитатами
-- сохраняет retrieval results в `results/`
+## Формат ответа (v2)
+
+```
+MODE: exact | inferred | insufficient
+CONFIDENCE: 0.82 (retrieval=0.71, llm=0.90)
+
+<answer text>
+
+FOUND:
+...
+
+REASONING:
+...   # если inferred / insufficient
+
+SOURCES:
+doc_id_1, doc_id_2, ...
+```
+
+Confidence:
+- high (≥0.85) — ответ прямо в контексте
+- mid (0.5–0.84) — частичная поддержка / inference
+- low (<0.5) — данных мало, ответу нельзя доверять как факту
 
 ## Результаты
 
-На FinanceBench порядок обычно такой (зависит от модели эмбеддингов и размера корпуса):
+Сравнение методов по метрикам NDCG, Recall и MRR на тестовой выборке:
 
-| Модель            | ndcg@5 | recall@5 | mrr@5 | ndcg@10 | recall@10 | mrr@10 |
-|-------------------|--------|----------|-------|---------|-----------|--------|
-| dense             | 0.7193 | 0.9222   | 0.6785 | 0.7424  | 0.9889    | 0.6841 |
-| hybrid+rerank     | 0.6859 | 0.8444   | 0.6548 | 0.7011  | 0.8889    | 0.6570 |
-| hybrid            | 0.4642 | 0.6222   | 0.4233 | 0.4888  | 0.6889    | 0.4344 |
-| bm25              | 0.2010 | 0.2444   | 0.2026 | 0.2357  | 0.3444    | 0.2187 |
+| Метод              | ndcg@5 | recall@5 | mrr@5 | ndcg@10 | recall@10 | mrr@10 |
+|--------------------|--------|----------|-------|---------|-----------|--------|
+| **hybrid+rerank**  | 0.8586 | 0.9444   | 0.8478| 0.8660  | 0.9667    | 0.8510 |
+| dense              | 0.7193 | 0.9222   | 0.6785| 0.7241  | 0.9333    | 0.6785 |
+| hybrid             | 0.4642 | 0.6222   | 0.4233| 0.4849  | 0.6778    | 0.4344 |
+| bm25               | 0.2010 | 0.2444   | 0.2026| 0.2055  | 0.2556    | 0.2058 |
 
-## Что можно улучшить
+## Что ещё можно улучшить
 
-- Domain embedding (`BAAI/bge-base-en-v1.5`, finance-tuned models) вместо MiniLM
-- Chunking длинных 10-K по секциям (Item 1A, MD&A) вместо готовых пассажей
-- Query expansion / HyDE перед ретривалом
-- RAGAS (faithfulness, answer_relevancy) — нужен LLM-as-judge, дорого по токенам
-- Late interaction (ColBERT) для длинных финансовых текстов
-- Кэш dense-индекса на диск между запусками
+- Domain embedding (`BAAI/bge-base-en-v1.5`) вместо MiniLM
+- Section-aware chunking 10-K
+- Query expansion / HyDE
+- RAGAS (faithfulness, answer_relevancy)
+- Кэш FAISS + reranker weights на диск
+- FIXME: для очень длинных пассажей bge-reranker режет по max_length=512 — иногда теряется хвост таблицы
 
 ## Воспроизводимость
 
-`RANDOM_STATE = 42`. Версии — в `requirements.txt`.
+`RANDOM_STATE = 42`. Зависимости — `requirements.txt`.

@@ -1,17 +1,30 @@
-"""Cross-encoder reranking."""
+"""Cross-encoder reranking (v2: BAAI/bge-reranker-v2-m3 by default)."""
 
 from __future__ import annotations
 
 from .data_loader import doc_text
 
-DEFAULT_RERANKER = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# multilingual, сильнее ms-marco MiniLM на длинных пассажах
+DEFAULT_RERANKER = "BAAI/bge-reranker-v2-m3"
 
 
 class CrossEncoderReranker:
-    def __init__(self, model_name: str = DEFAULT_RERANKER, device: str | None = None):
+    def __init__(
+        self,
+        model_name: str = DEFAULT_RERANKER,
+        device: str | None = None,
+        max_length: int = 512,
+    ):
         from sentence_transformers import CrossEncoder
 
-        self.model = CrossEncoder(model_name, device=device)
+        # trust_remote_code нужен для части BGE-моделей
+        self.model = CrossEncoder(
+            model_name,
+            device=device,
+            max_length=max_length,
+            trust_remote_code=True,
+        )
+        self.model_name = model_name
 
     def rerank(
         self,
@@ -19,6 +32,7 @@ class CrossEncoderReranker:
         candidates: list[tuple[str, float]],
         corpus: dict[str, dict],
         top_k: int = 10,
+        max_chars: int = 2000,
     ) -> list[tuple[str, float]]:
         if not candidates:
             return []
@@ -27,10 +41,11 @@ class CrossEncoderReranker:
         for doc_id, _ in candidates:
             if doc_id not in corpus:
                 continue
-            pairs.append([query, doc_text(corpus[doc_id], max_chars=2000)])
+            pairs.append([query, doc_text(corpus[doc_id], max_chars=max_chars)])
             ids.append(doc_id)
         if not pairs:
             return []
-        scores = self.model.predict(pairs)
+
+        scores = self.model.predict(pairs, show_progress_bar=len(pairs) > 64)
         ranked = sorted(zip(ids, scores), key=lambda x: float(x[1]), reverse=True)
         return [(d, float(s)) for d, s in ranked[:top_k]]
